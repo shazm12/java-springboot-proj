@@ -15,8 +15,6 @@ import com.pm.patient_service.service.PatientService;
 
 import jakarta.validation.Valid;
 
-// continue from 1:42:47
-
 @RestController
 @RequestMapping("/patients")
 public class PatientController {
