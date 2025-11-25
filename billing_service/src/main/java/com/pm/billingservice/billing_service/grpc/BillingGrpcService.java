@@ -6,7 +6,7 @@ import io.grpc.stub.StreamObserver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import billing.BillingRequest;
+import biling.BillingRequest;
 import billing.BillingResponse;
 
 
@@ -19,7 +19,7 @@ public class BillingGrpcService extends BillingServiceImplBase {
     @Override
     public void createBillingAccount(BillingRequest billingRequest, StreamObserver<BillingResponse> responseObserver) {
 
-        log.info("creatingBillingACcount request received {}", billingRequest.toString());
+        log.info("creatingBillingAccount request received {}", billingRequest.toString());
 
         // Business Logic - eg save to db, perform calculations etc
 
