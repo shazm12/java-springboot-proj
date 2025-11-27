@@ -1,12 +1,34 @@
 package com.pm.patient_service.kafka;
 
+import com.pm.patient_service.model.Patient;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
+@Service
 public class KafkaProducer {
 
+    private static final Logger log = LoggerFactory.getLogger(KafkaProducer.class);
     private final KafkaTemplate<String, byte[]> kafkaTemplate;
 
     public KafkaProducer(KafkaTemplate<String, byte[]> kafkaTemplate) {
         this.kafkaTemplate = kafkaTemplate;
+    }
+
+    public void sendEvent(Patient patient) {
+        Patient event = PatientEvent.newBuilder()
+            .setPatientId(patient.getId().toString())
+            .setName(patient.getName())
+            .setEmail(patient.getEmail())
+            .setEventType("PAITENT_CREATED")
+            .build();
+        
+            try {
+                kafkaTemplate.send("patient", event.toByteArray());
+            }
+            catch(Exception e) {
+                log.error("Error sending PatientCreated event: {}", event);
+            } 
+        
     }
 
 
