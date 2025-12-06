@@ -8,14 +8,14 @@ spring:
                 - id: patient-service-routes
                   uri: http://patient-service:4000
                   predicates:
-                    - path=/api/paitents/**
+                    - Path=/api/paitents/**
                   filters:
-                   - strip-prefix=1
+                   - StripPrefix=1
                 - id: api-docs-patient-routes
                   uri: http://patient-service:4000
                   predicates:
-                    - path=/api-docs/paitents
+                    - Path=/api-docs/paitents
                   filters:
-                    - rewrite-path=/api-docs/patients,/v3/api-docs
+                    - RewritePath=/api-docs/patients,/v3/api-docs
                     
 
