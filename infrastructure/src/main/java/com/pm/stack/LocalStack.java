@@ -34,6 +34,7 @@ import software.amazon.awscdk.services.ecs.ContainerImage;
 import software.amazon.awscdk.services.ecs.FargateService;
 import software.amazon.awscdk.services.ecs.FargateTaskDefinition;
 import software.amazon.awscdk.services.ecs.LogDriver;
+import software.amazon.awscdk.services.ecs.patterns.ApplicationLoadBalancedFargateService;
 import software.amazon.awscdk.services.logs.RetentionDays;
 import software.amazon.awscdk.services.rds.DatabaseInstanceEngine;
 import software.amazon.awscdk.services.rds.PostgresEngineVersion;
@@ -42,147 +43,211 @@ import software.amazon.awscdk.services.route53.CfnHealthCheck;
 
 public class LocalStack extends Stack {
 
-    private final Vpc vpc;
+        private final Vpc vpc;
 
-    private final Cluster ecsCluster;
+        private final Cluster ecsCluster;
 
-    public LocalStack(final App scope, final String id, final StackProps props) {
-        super(scope, id, props);
-        this.vpc = createVpc();
-        this.ecsCluster = createEcsCluster();
-        DatabaseInstance authServiceDB = createDatabase("AuthServiceDB", "auth-service-db");
-        DatabaseInstance patientServiceDB = createDatabase("PatientServiceDB", "patient-service-db");
+        public LocalStack(final App scope, final String id, final StackProps props) {
+                super(scope, id, props);
+                this.vpc = createVpc();
+                this.ecsCluster = createEcsCluster();
+                DatabaseInstance authServiceDB = createDatabase("AuthServiceDB", "auth-service-db");
+                DatabaseInstance patientServiceDB = createDatabase("PatientServiceDB", "patient-service-db");
 
-        CfnHealthCheck authDbCfnHealthCheck = createDbHealthCheck(authServiceDB, "AuthDbHealthCheck");
-        CfnHealthCheck patientDbCfnHealthCheck = createDbHealthCheck(patientServiceDB, "PatientDbHealthCheck");
+                CfnHealthCheck authDbCfnHealthCheck = createDbHealthCheck(authServiceDB, "AuthDbHealthCheck");
+                CfnHealthCheck patientDbCfnHealthCheck = createDbHealthCheck(patientServiceDB, "PatientDbHealthCheck");
 
-        CfnCluster mskCluster = createMskCluster();
+                CfnCluster mskCluster = createMskCluster();
 
-        FargateService authService = createFargateService("AuthService", "auth-service-image",
-                List.of(4005), authServiceDB, Map.of("JWT_SECERET", "secert"));
+                FargateService authService = createFargateService("AuthService", "auth-service-image",
+                                List.of(4005), authServiceDB, Map.of("JWT_SECERET", "secert"));
 
-        authService.getNode().addDependency(authDbCfnHealthCheck);
-        authService.getNode().addDependency(authServiceDB);
+                authService.getNode().addDependency(authDbCfnHealthCheck);
+                authService.getNode().addDependency(authServiceDB);
 
-    }
+                FargateService billingService = createFargateService("BillingService", "billing-service-image",
+                                List.of(4001, 9001), null, null);
 
-    private Vpc createVpc() {
-        return Vpc.Builder.create(this, "PatientManagementVPC")
-                .vpcName("PatientManagementVPC")
-                .maxAzs(2)
-                .build();
-    }
+                FargateService analyticsService = createFargateService("AnalyticsService", "analytics-service-image",
+                                List.of(4002), null, null);
 
-    private DatabaseInstance createDatabase(String id, String dbName) {
-        return DatabaseInstance.Builder.create(this, id)
-                .engine(DatabaseInstanceEngine
-                        .postgres(PostgresInstanceEngineProps.builder()
-                                .version(PostgresEngineVersion.VER_17_2))
-                        .build())
-                .vpc(vpc)
-                .instanceType(InstanceType.of(InstanceClass.BURSTABLE2, InstanceSize.MICRO))
-                .allocatedStorage(20)
-                .credentials(Credentials.fromGeneratedSecret("admin_user"))
-                .datbaseName(dbName)
-                .removalPolicy(RemovalPolicy.DESTROY)
-                .build();
-    }
+                analyticsService.getNode().addDependency(mskCluster);
 
-    private cfnHealthCheck createDbHealthCheck(DatabaseInstance db, String id) {
-        return CfnHealthCheck.Builder.create(this, id)
-                .healthCheckConfig(CfnHealthCheck.HealthCheckConfigProperty.builder()
-                        .type("TCP")
-                        .port(Token.asNumber(db.getDbInstanceEndpointPort()))
-                        .ipAddress(db.getDbInstanceEndpointAddress())
-                        .requestInterval(30)
-                        .failureThreshold(3)
-                        .build())
-                .build();
-    }
+                FargateService patientService = createFargateService("PatientService", "patient-service-image",
+                                List.of(4003), patientServiceDB, Map.of("BILLING_SERVICE_ADDRESS",
+                                                "host.docker.internal", "BILLING_SERVICE_GRPC_PORT", 9001));
+                patientService.getNode().addDependency(patientDbCfnHealthCheck);
+                patientService.getNode().addDependency(patientServiceDB);
+                patientService.getNode().addDependency(billingService);
+                patientService.getNode().addDependency(mskCluster);
 
-    private CfnCluster createMskCluster() {
-        return CfnCluster.Builder.create(this, "MskCluster")
-                .clusterName("kafka-cluster")
-                .kafkaVersion("2.8.0")
-                .numberOfBrokerNodes(1)
-                .brokerNodeGroupInfo(
-                        CfnCluster.BrokerNodeGroupInfoProperty.builder().instanceType("kafka.m5.xlarge")
-                                .clientSubnets(
-                                        (vpc.getPrivateSubnets().stream().map(ISubnet::getSubnetId)
-                                                .collect(Collectors.toList())))
-                                .brokerAzDistribution("DEFAULT")
-                                .build())
-                .build();
-    }
+                createApiGatewayService();
 
-    private Cluster createEcsCluster() {
-        return Cluster.Builder.create(this, "PatientManagementEcsCluster")
-                .clusterName("PatientManagementEcsCluster")
-                .vpc(vpc)
-                .defaultCloudMapNamespace(CloudMapNamespaceOptions.builder().name("patientmanagement.local").build())
-                .build();
-    }
-
-    private FargateService createFargateService(String id, String imageName, List<Integer> ports, DatabaseInstance db,
-            Map<String, String> additionalEnvVars) {
-
-        FargateTaskDefinition taskDefinition = FargateTaskDefination.Builder.create(this, id + "Task")
-
-                .cpu(256)
-                .memeoryLimitMiB(512)
-
-                .build();
-
-        ContainerDefinitionOptions.Builder containerDefinitionOptions = ContainerDefinitionOptions.builder()
-                .image(ContainerImage.fromRegistry(imageName))
-                .portMappings(ports.stream().map(port -> PortMapping.builder()
-                        .containerPort(port).hostPort(port).protocol().build(Protocol.TCP).toList()))
-                .logging(LogDriver.awsLogs(AwsLogDriverProps.builder()
-                        .logGroup(LogGroup.Buidler.create(this, id + "LogGroup").logGroupName("/ecs/" + imageName)
-                                .removalPolicy(RemovalPolicy.DESTROY).retention(RetentionDays.ONE_DAY).build())
-                        .build()));
-
-        Map<String, String> envVars = new HashMap<>();
-        envVars.put("SPRING_KAFKA_BOOTSTRAP_SERVERS", "localhost.localstack.cloud:4510",
-                "localhost.localstack.cloud:4511", "localhost.localstack.cloud:4512");
-
-        if (addtionalEnvVars != null) {
-            envVars.putAll(additionalEnvVars);
         }
 
-        if (db != null) {
-            envVars.put("SPRING_DATASOURCE_URL", "jdbc:postgresql://%s:%s/%s-db"
-                    .formatted(db.getDbInstanceEndpointAddress(), db.getDbInstanceEndpointPort(), imageName));
-            envVars.put("SPRING_DATASOURCE_USERNAME", "admin_user");
-            envVars.put("SPRING_DATASOURCE_PASSWORD", db.getSecret().secretValueFromJson("password").toString());
-            envVars.put("SPRING_JPA_HIBERNATE_DDL_AUTO", "update");
-            envVars.put("SPRING_SQL_INIT_MODE", "always");
-            envVars.put("SPRING_DATASOURCE_HIKARI_INITIALIZATION_FAIL_TIMEOUT", "60000");
+        private Vpc createVpc() {
+                return Vpc.Builder.create(this, "PatientManagementVPC")
+                                .vpcName("PatientManagementVPC")
+                                .maxAzs(2)
+                                .build();
         }
 
-        containerDefinitionOptions.environment(envVars);
-        taskDefinition.addContainer(imageName + "Container", containerDefinitionOptions.build());
+        private DatabaseInstance createDatabase(String id, String dbName) {
+                return DatabaseInstance.Builder.create(this, id)
+                                .engine(DatabaseInstanceEngine
+                                                .postgres(PostgresInstanceEngineProps.builder()
+                                                                .version(PostgresEngineVersion.VER_17_2))
+                                                .build())
+                                .vpc(vpc)
+                                .instanceType(InstanceType.of(InstanceClass.BURSTABLE2, InstanceSize.MICRO))
+                                .allocatedStorage(20)
+                                .credentials(Credentials.fromGeneratedSecret("admin_user"))
+                                .datbaseName(dbName)
+                                .removalPolicy(RemovalPolicy.DESTROY)
+                                .build();
+        }
 
-        return FargateService.Builder.create(this, id)
-                .cluster(ecsCluster)
-                .taskDefination(taskDefinition)
-                .assignPublicIp(false)
-                .serviceName(imageName)
-                .build();
+        private cfnHealthCheck createDbHealthCheck(DatabaseInstance db, String id) {
+                return CfnHealthCheck.Builder.create(this, id)
+                                .healthCheckConfig(CfnHealthCheck.HealthCheckConfigProperty.builder()
+                                                .type("TCP")
+                                                .port(Token.asNumber(db.getDbInstanceEndpointPort()))
+                                                .ipAddress(db.getDbInstanceEndpointAddress())
+                                                .requestInterval(30)
+                                                .failureThreshold(3)
+                                                .build())
+                                .build();
+        }
 
-    }
+        private CfnCluster createMskCluster() {
+                return CfnCluster.Builder.create(this, "MskCluster")
+                                .clusterName("kafka-cluster")
+                                .kafkaVersion("2.8.0")
+                                .numberOfBrokerNodes(1)
+                                .brokerNodeGroupInfo(
+                                                CfnCluster.BrokerNodeGroupInfoProperty.builder()
+                                                                .instanceType("kafka.m5.xlarge")
+                                                                .clientSubnets(
+                                                                                (vpc.getPrivateSubnets().stream().map(
+                                                                                                ISubnet::getSubnetId)
+                                                                                                .collect(Collectors
+                                                                                                                .toList())))
+                                                                .brokerAzDistribution("DEFAULT")
+                                                                .build())
+                                .build();
+        }
 
-    public static void main(final String[] args) {
-        App app = new App(AppProps.builder().outdir("./cdk.out").build());
+        private Cluster createEcsCluster() {
+                return Cluster.Builder.create(this, "PatientManagementEcsCluster")
+                                .clusterName("PatientManagementEcsCluster")
+                                .vpc(vpc)
+                                .defaultCloudMapNamespace(CloudMapNamespaceOptions.builder()
+                                                .name("patientmanagement.local").build())
+                                .build();
+        }
 
-        StackProps stackProps = StackProps.builder().synthesizer(new BootstraplessSynthesizer()).build();
+        private FargateService createFargateService(String id, String imageName, List<Integer> ports,
+                        DatabaseInstance db,
+                        Map<String, String> additionalEnvVars) {
 
-        new LocalStack(app, "localstack", stackProps);
+                FargateTaskDefinition taskDefinition = FargateTaskDefination.Builder.create(this, id + "Task")
 
-        app.synth();
+                                .cpu(256)
+                                .memeoryLimitMiB(512)
 
-        System.out.println("App synthesizing in progress...");
+                                .build();
 
-    }
+                ContainerDefinitionOptions.Builder containerDefinitionOptions = ContainerDefinitionOptions.builder()
+                                .image(ContainerImage.fromRegistry(imageName))
+                                .portMappings(ports.stream().map(port -> PortMapping.builder()
+                                                .containerPort(port).hostPort(port).protocol().build(Protocol.TCP)
+                                                .toList()))
+                                .logging(LogDriver.awsLogs(AwsLogDriverProps.builder()
+                                                .logGroup(LogGroup.Buidler.create(this, id + "LogGroup")
+                                                                .logGroupName("/ecs/" + imageName)
+                                                                .removalPolicy(RemovalPolicy.DESTROY)
+                                                                .retention(RetentionDays.ONE_DAY).build())
+                                                .streamPrefix(imageName)
+                                                .build()));
+
+                Map<String, String> envVars = new HashMap<>();
+                envVars.put("SPRING_KAFKA_BOOTSTRAP_SERVERS", "localhost.localstack.cloud:4510",
+                                "localhost.localstack.cloud:4511", "localhost.localstack.cloud:4512");
+
+                if (addtionalEnvVars != null) {
+                        envVars.putAll(additionalEnvVars);
+                }
+
+                if (db != null) {
+                        envVars.put("SPRING_DATASOURCE_URL", "jdbc:postgresql://%s:%s/%s-db"
+                                        .formatted(db.getDbInstanceEndpointAddress(), db.getDbInstanceEndpointPort(),
+                                                        imageName));
+                        envVars.put("SPRING_DATASOURCE_USERNAME", "admin_user");
+                        envVars.put("SPRING_DATASOURCE_PASSWORD",
+                                        db.getSecret().secretValueFromJson("password").toString());
+                        envVars.put("SPRING_JPA_HIBERNATE_DDL_AUTO", "update");
+                        envVars.put("SPRING_SQL_INIT_MODE", "always");
+                        envVars.put("SPRING_DATASOURCE_HIKARI_INITIALIZATION_FAIL_TIMEOUT", "60000");
+                }
+
+                containerDefinitionOptions.environment(envVars);
+                taskDefinition.addContainer(imageName + "Container", containerDefinitionOptions.build());
+
+                return FargateService.Builder.create(this, id)
+                                .cluster(ecsCluster)
+                                .taskDefination(taskDefinition)
+                                .assignPublicIp(false)
+                                .serviceName(imageName)
+                                .build();
+
+        }
+
+        private void createApiGatewayService() {
+                FargateTaskDefinition taskDefinition = FargateTaskDefination.Builder.create(this, id + "APIGatewayTaskDefination")
+                                .cpu(256)
+                                .memeoryLimitMiB(512)
+
+                                .build();
+
+                ContainerDefinitionOptions.Builder containerDefinitionOptions = ContainerDefinitionOptions.builder()
+                                .image(ContainerImage.fromRegistry("api-gateway"))
+                                .environment(Map.of(:"SPRING_PROFILES_ACTIVE", "prod", "AUTH_SERVICE_URL", "http://host.docker.internal:4005"))
+                                .portMappings(List.of(4004).stream().map(port -> PortMapping.builder()
+                                                .containerPort(port).hostPort(port).protocol().build(Protocol.TCP)
+                                                .toList()))
+                                .logging(LogDriver.awsLogs(AwsLogDriverProps.builder()
+                                                .logGroup(LogGroup.Buidler.create(this, "APIGatewayLogGroup")
+                                                                .logGroupName("/ecs/" + "api-gateway")
+                                                                .removalPolicy(RemovalPolicy.DESTROY)
+                                                                .retention(RetentionDays.ONE_DAY).build())
+                                                .streamPrefix("api-gateway")
+                                                .build()))
+                                .build();
+                
+                taskDefinition.addContainer("APIGatewayContainer", containerDefinitionOptions.build());
+
+                ApplicationLoadBalancedFargateService apiGateway = ApplicationLoadBalancedFargateService.Builder.create(this, "APIGatewayService")
+                        .cluster(ecsCluster)
+                        .serviceName("api-gateway")
+                        .taskDefinition(taskDefinition)
+                        .desiredCount(1)
+                        .healthCheckGracePeriod(Duration.seconds(60))
+                        .build();
+        
+
+        }
+
+        public static void main(final String[] args) {
+                App app = new App(AppProps.builder().outdir("./cdk.out").build());
+
+                StackProps stackProps = StackProps.builder().synthesizer(new BootstraplessSynthesizer()).build();
+
+                new LocalStack(app, "localstack", stackProps);
+
+                app.synth();
+
+                System.out.println("App synthesizing in progress...");
+
+        }
 
 }
